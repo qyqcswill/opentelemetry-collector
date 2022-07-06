@@ -31,14 +31,14 @@ import (
 
 const zExtensionName = "zextensionname"
 
-// BuiltExtensions is a map of extensions created from extension configs.
-type BuiltExtensions struct {
+// Extensions is a map of extensions created from extension configs.
+type Extensions struct {
 	telemetry component.TelemetrySettings
 	extMap    map[config.ComponentID]component.Extension
 }
 
 // StartAll starts all extensions.
-func (bes *BuiltExtensions) StartAll(ctx context.Context, host component.Host) error {
+func (bes *Extensions) StartAll(ctx context.Context, host component.Host) error {
 	bes.telemetry.Logger.Info("Starting extensions...")
 	for extID, ext := range bes.extMap {
 		extLogger := extensionLogger(bes.telemetry.Logger, extID)
@@ -52,7 +52,7 @@ func (bes *BuiltExtensions) StartAll(ctx context.Context, host component.Host) e
 }
 
 // ShutdownAll stops all extensions.
-func (bes *BuiltExtensions) ShutdownAll(ctx context.Context) error {
+func (bes *Extensions) ShutdownAll(ctx context.Context) error {
 	bes.telemetry.Logger.Info("Stopping extensions...")
 	var errs error
 	for _, ext := range bes.extMap {
@@ -62,7 +62,7 @@ func (bes *BuiltExtensions) ShutdownAll(ctx context.Context) error {
 	return errs
 }
 
-func (bes *BuiltExtensions) NotifyPipelineReady() error {
+func (bes *Extensions) NotifyPipelineReady() error {
 	for extID, ext := range bes.extMap {
 		if pw, ok := ext.(component.PipelineWatcher); ok {
 			if err := pw.Ready(); err != nil {
@@ -73,7 +73,7 @@ func (bes *BuiltExtensions) NotifyPipelineReady() error {
 	return nil
 }
 
-func (bes *BuiltExtensions) NotifyPipelineNotReady() error {
+func (bes *Extensions) NotifyPipelineNotReady() error {
 	// Notify extensions in reverse order.
 	var errs error
 	for _, ext := range bes.extMap {
@@ -84,7 +84,7 @@ func (bes *BuiltExtensions) NotifyPipelineNotReady() error {
 	return errs
 }
 
-func (bes *BuiltExtensions) GetExtensions() map[config.ComponentID]component.Extension {
+func (bes *Extensions) GetExtensions() map[config.ComponentID]component.Extension {
 	result := make(map[config.ComponentID]component.Extension, len(bes.extMap))
 	for extID, v := range bes.extMap {
 		result[extID] = v
@@ -92,7 +92,7 @@ func (bes *BuiltExtensions) GetExtensions() map[config.ComponentID]component.Ext
 	return result
 }
 
-func (bes *BuiltExtensions) HandleZPages(w http.ResponseWriter, r *http.Request) {
+func (bes *Extensions) HandleZPages(w http.ResponseWriter, r *http.Request) {
 	extensionName := r.URL.Query().Get(zExtensionName)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -118,38 +118,52 @@ func (bes *BuiltExtensions) HandleZPages(w http.ResponseWriter, r *http.Request)
 	zpages.WriteHTMLPageFooter(w)
 }
 
-// Build builds BuiltExtensions from config.
-func Build(
-	ctx context.Context,
-	settings component.TelemetrySettings,
-	buildInfo component.BuildInfo,
-	extensionsConfigs map[config.ComponentID]config.Extension,
-	serviceExtensions []config.ComponentID,
-	factories map[config.Type]component.ExtensionFactory,
-) (*BuiltExtensions, error) {
-	exts := &BuiltExtensions{
-		telemetry: settings,
+// Settings holds configuration for building Extensions.
+type Settings struct {
+	Telemetry component.TelemetrySettings
+	BuildInfo component.BuildInfo
+
+	// Configs is a map of config.ComponentID to config.Extension.
+	Configs map[config.ComponentID]config.Extension
+
+	// Factories maps extension type names in the config to the respective component.ExtensionFactory.
+	Factories map[config.Type]component.ExtensionFactory
+
+	// ServiceExtensions are the ordered list of extensions configured for the service.
+	ServiceExtensions []config.ComponentID
+}
+
+// Build builds Extensions from config.
+func Build(ctx context.Context, set Settings) (*Extensions, error) {
+	exts := &Extensions{
+		telemetry: set.Telemetry,
 		extMap:    make(map[config.ComponentID]component.Extension),
 	}
-	for _, extID := range serviceExtensions {
-		extCfg, existsCfg := extensionsConfigs[extID]
+	for _, extID := range set.ServiceExtensions {
+		extCfg, existsCfg := set.Configs[extID]
 		if !existsCfg {
 			return nil, fmt.Errorf("extension %q is not configured", extID)
 		}
 
-		factory, existsFactory := factories[extID.Type()]
+		factory, existsFactory := set.Factories[extID.Type()]
 		if !existsFactory {
 			return nil, fmt.Errorf("extension factory for type %q is not configured", extID.Type())
 		}
 
-		set := component.ExtensionCreateSettings{
-			TelemetrySettings: settings,
-			BuildInfo:         buildInfo,
+		extSet := component.ExtensionCreateSettings{
+			TelemetrySettings: set.Telemetry,
+			BuildInfo:         set.BuildInfo,
 		}
-		set.TelemetrySettings.Logger = settings.Logger
-		ext, err := buildExtension(ctx, factory, set, extCfg)
+		extSet.TelemetrySettings.Logger = extensionLogger(set.Telemetry.Logger, extID)
+
+		ext, err := factory.CreateExtension(ctx, extSet, extCfg)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to create extension %q: %w", extID, err)
+		}
+
+		// Check if the factory really created the extension.
+		if ext == nil {
+			return nil, fmt.Errorf("factory for %q produced a nil extension", extID)
 		}
 
 		exts.extMap[extID] = ext
@@ -162,18 +176,4 @@ func extensionLogger(logger *zap.Logger, id config.ComponentID) *zap.Logger {
 	return logger.With(
 		zap.String(components.ZapKindKey, components.ZapKindExtension),
 		zap.String(components.ZapNameKey, id.String()))
-}
-
-func buildExtension(ctx context.Context, factory component.ExtensionFactory, creationSet component.ExtensionCreateSettings, cfg config.Extension) (component.Extension, error) {
-	ext, err := factory.CreateExtension(ctx, creationSet, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create extension %q: %w", cfg.ID(), err)
-	}
-
-	// Check if the factory really created the extension.
-	if ext == nil {
-		return nil, fmt.Errorf("factory for %q produced a nil extension", cfg.ID())
-	}
-
-	return ext, nil
 }

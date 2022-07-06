@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### 🛑 Breaking changes 🛑
+
+- Remove deprecated `config.ServiceTelemetry` (#5565)
+- Remove deprecated `config.ServiceTelemetryLogs` (#5565)
+- Remove deprecated `config.ServiceTelemetryMetrics` (#5565)
+
+### 🚩 Deprecations 🚩
+
+- Deprecate `service.ConfigServiceTelemetry`, `service.ConfigServiceTelemetryLogs`, and `service.ConfigServiceTelemetryMetrics` (#5565)
+- Deprecate the following component functions to ensure a stability level is set (#5580):
+  - `component.WithTracesExporter` -> `component.WithTracesExporterAndStabilityLevel`
+  - `component.WithMetricsExporter` -> `component.WithMetricsExporterAndStabilityLevel`
+  - `component.WithLogsExporter` -> `component.WithLogsExporterAndStabilityLevel`
+  - `component.WithTracesReceiver` -> `component.WithTracesReceiverAndStabilityLevel`
+  - `component.WithMetricsReceiver` -> `component.WithMetricsReceiverAndStabilityLevel`
+  - `component.WithLogsReceiver` -> `component.WithLogsReceiverAndStabilityLevel`
+  - `component.WithTracesProcessor` -> `component.WithTracesProcessorAndStabilityLevel`
+  - `component.WithMetricsProcessor` -> `component.WithMetricsProcessorAndStabilityLevel`
+  - `component.WithLogsProcessor` -> `component.WithLogsProcessorAndStabilityLevel`
+
+### 💡 Enhancements 💡
+
+- Components stability levels are now logged. By default components which haven't defined their stability levels, or which are
+  unmaintained, deprecated or in development will log a message. (#5580)
+
+### 💡 Enhancements 💡
+
+- `exporter/logging`: Skip "bad file descriptor" sync errors (#5585)
+
+### 🧰 Bug fixes 🧰
+
+- Fix initialization of the OpenTelemetry MetricProvider. (#5571)
+
 ## v0.54.0 Beta
 
 ### 🛑 Breaking changes 🛑
@@ -35,6 +68,7 @@
 
 ### 💡 Enhancements 💡
 
+- Deprecate `HTTPClientSettings.ToClient` in favor of `HTTPClientSettings.ToClientWithHost` (#5584)
 - Use OpenCensus `metric` package for process metrics instead of `stats` package (#5486)
 - Update OTLP to v0.18.0 (#5530)
 - Log histogram min/max fields with `logging` exporter (#5520)
@@ -85,6 +119,7 @@
 
 - Fixes the "service.version" label value for internal metrics, always was "latest" in core/contrib distros. (#5449).
 - Send correct batch stats when SendBatchMaxSize is set (#5385)
+- TLS `MinVersion` and `MaxVersion` defaults will be handled by `crypto/tls` (#5480)
 
 ## v0.52.0 Beta
 

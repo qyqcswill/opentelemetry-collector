@@ -67,7 +67,7 @@ type Pipelines struct {
 
 // StartAll starts all pipelines.
 //
-// Start with exporters, processors (in revers configured order), then receivers.
+// Start with exporters, processors (in reverse configured order), then receivers.
 // This is important so that components that are earlier in the pipeline and reference components that are
 // later in the pipeline do not start sending data to later components which are not yet started.
 func (bps *Pipelines) StartAll(ctx context.Context, host component.Host) error {
@@ -99,11 +99,11 @@ func (bps *Pipelines) StartAll(ctx context.Context, host component.Host) error {
 	for dt, recvByID := range bps.allReceivers {
 		for recvID, recv := range recvByID {
 			recvLogger := receiverLogger(bps.telemetry.Logger, recvID, dt)
-			recvLogger.Info("Exporter is starting...")
+			recvLogger.Info("Receiver is starting...")
 			if err := recv.Start(ctx, components.NewHostWrapper(host, recvLogger)); err != nil {
 				return err
 			}
-			recvLogger.Info("Exporter started.")
+			recvLogger.Info("Receiver started.")
 		}
 	}
 	return nil
@@ -177,13 +177,40 @@ func (bps *Pipelines) HandleZPages(w http.ResponseWriter, r *http.Request) {
 	zpages.WriteHTMLPageFooter(w)
 }
 
+// Settings holds configuration for building Pipelines.
+type Settings struct {
+	Telemetry component.TelemetrySettings
+	BuildInfo component.BuildInfo
+
+	// ReceiverFactories maps receiver type names in the config to the respective component.ReceiverFactory.
+	ReceiverFactories map[config.Type]component.ReceiverFactory
+
+	// ReceiverConfigs is a map of config.ComponentID to config.Receiver.
+	ReceiverConfigs map[config.ComponentID]config.Receiver
+
+	// ProcessorFactories maps processor type names in the config to the respective component.ProcessorFactory.
+	ProcessorFactories map[config.Type]component.ProcessorFactory
+
+	// ProcessorConfigs is a map of config.ComponentID to config.Processor.
+	ProcessorConfigs map[config.ComponentID]config.Processor
+
+	// ExporterFactories maps exporter type names in the config to the respective component.ExporterFactory.
+	ExporterFactories map[config.Type]component.ExporterFactory
+
+	// ExporterConfigs is a map of config.ComponentID to config.Exporter.
+	ExporterConfigs map[config.ComponentID]config.Exporter
+
+	// PipelineConfigs is a map of config.ComponentID to config.Pipeline.
+	PipelineConfigs map[config.ComponentID]*config.Pipeline
+}
+
 // Build builds all pipelines from config.
-func Build(ctx context.Context, settings component.TelemetrySettings, buildInfo component.BuildInfo, cfg *config.Config, factories component.Factories) (*Pipelines, error) {
+func Build(ctx context.Context, set Settings) (*Pipelines, error) {
 	exps := &Pipelines{
-		telemetry:    settings,
+		telemetry:    set.Telemetry,
 		allReceivers: make(map[config.DataType]map[config.ComponentID]component.Receiver),
 		allExporters: make(map[config.DataType]map[config.ComponentID]component.Exporter),
-		pipelines:    make(map[config.ComponentID]*builtPipeline, len(cfg.Service.Pipelines)),
+		pipelines:    make(map[config.ComponentID]*builtPipeline, len(set.PipelineConfigs)),
 	}
 
 	receiversConsumers := make(map[config.DataType]map[config.ComponentID][]baseConsumer)
@@ -191,7 +218,7 @@ func Build(ctx context.Context, settings component.TelemetrySettings, buildInfo 
 	// Iterate over all pipelines, and create exporters, then processors.
 	// Receivers cannot be created since we need to know all consumers, a.k.a. we need all pipelines build up to the
 	// first processor.
-	for pipelineID, pipeline := range cfg.Service.Pipelines {
+	for pipelineID, pipeline := range set.PipelineConfigs {
 		// The data type of the pipeline defines what data type each exporter is expected to receive.
 		if _, ok := exps.allExporters[pipelineID.Type()]; !ok {
 			exps.allExporters[pipelineID.Type()] = make(map[config.ComponentID]component.Exporter)
@@ -213,7 +240,7 @@ func Build(ctx context.Context, settings component.TelemetrySettings, buildInfo 
 				continue
 			}
 
-			exp, err := buildExporter(ctx, settings, buildInfo, cfg.Exporters, factories.Exporters, expID, pipelineID)
+			exp, err := buildExporter(ctx, set.Telemetry, set.BuildInfo, set.ExporterConfigs, set.ExporterFactories, expID, pipelineID)
 			if err != nil {
 				return nil, err
 			}
@@ -241,7 +268,7 @@ func Build(ctx context.Context, settings component.TelemetrySettings, buildInfo 
 		for i := len(pipeline.Processors) - 1; i >= 0; i-- {
 			procID := pipeline.Processors[i]
 
-			proc, err := buildProcessor(ctx, settings, buildInfo, cfg.Processors, factories.Processors, procID, pipelineID, bp.lastConsumer)
+			proc, err := buildProcessor(ctx, set.Telemetry, set.BuildInfo, set.ProcessorConfigs, set.ProcessorFactories, procID, pipelineID, bp.lastConsumer)
 			if err != nil {
 				return nil, err
 			}
@@ -276,7 +303,7 @@ func Build(ctx context.Context, settings component.TelemetrySettings, buildInfo 
 	}
 
 	// Now that we built the `receiversConsumers` map, we can build the receivers as well.
-	for pipelineID, pipeline := range cfg.Service.Pipelines {
+	for pipelineID, pipeline := range set.PipelineConfigs {
 		// The data type of the pipeline defines what data type each exporter is expected to receive.
 		if _, ok := exps.allReceivers[pipelineID.Type()]; !ok {
 			exps.allReceivers[pipelineID.Type()] = make(map[config.ComponentID]component.Receiver)
@@ -292,7 +319,7 @@ func Build(ctx context.Context, settings component.TelemetrySettings, buildInfo 
 				continue
 			}
 
-			recv, err := buildReceiver(ctx, settings, buildInfo, cfg.Receivers, factories.Receivers, recvID, pipelineID, receiversConsumers[pipelineID.Type()][recvID])
+			recv, err := buildReceiver(ctx, set.Telemetry, set.BuildInfo, set.ReceiverConfigs, set.ReceiverFactories, recvID, pipelineID, receiversConsumers[pipelineID.Type()][recvID])
 			if err != nil {
 				return nil, err
 			}
@@ -302,6 +329,21 @@ func Build(ctx context.Context, settings component.TelemetrySettings, buildInfo 
 		}
 	}
 	return exps, nil
+}
+
+func logStabilityMessage(logger *zap.Logger, sl component.StabilityLevel) {
+	switch sl {
+	case component.StabilityLevelDeprecated:
+		logger.Info("Component has been deprecated and will be removed in future releases.", zap.String(components.ZapStabilityKey, sl.String()))
+	case component.StabilityLevelUnmaintained:
+		logger.Info("Component is unmaintained and actively looking for contributors. This component will become deprecated after 6 months of remaining unmaintained", zap.String(components.ZapStabilityKey, sl.String()))
+	case component.StabilityLevelInDevelopment:
+		logger.Info("Component is under development.", zap.String(components.ZapStabilityKey, sl.String()))
+	case component.StabilityLevelAlpha, component.StabilityLevelBeta, component.StabilityLevelStable:
+		logger.Debug("Stability level", zap.String(components.ZapStabilityKey, sl.String()))
+	default:
+		logger.Info("Stability level of component undefined", zap.String(components.ZapStabilityKey, sl.String()))
+	}
 }
 
 func buildExporter(
@@ -328,10 +370,11 @@ func buildExporter(
 		BuildInfo:         buildInfo,
 	}
 	set.TelemetrySettings.Logger = exporterLogger(settings.Logger, id, pipelineID.Type())
+	logStabilityMessage(set.TelemetrySettings.Logger, factory.StabilityLevel(pipelineID.Type()))
 
 	exp, err := createExporter(ctx, set, cfg, id, pipelineID, factory)
 	if err != nil {
-		return nil, fmt.Errorf("failt to create %q exporter, in pipeline %q: %w", id, pipelineID, err)
+		return nil, fmt.Errorf("failed to create %q exporter, in pipeline %q: %w", id, pipelineID, err)
 	}
 
 	return exp, nil
@@ -409,10 +452,11 @@ func buildProcessor(ctx context.Context,
 		BuildInfo:         buildInfo,
 	}
 	set.TelemetrySettings.Logger = processorLogger(settings.Logger, id, pipelineID)
+	logStabilityMessage(set.TelemetrySettings.Logger, factory.StabilityLevel(pipelineID.Type()))
 
 	proc, err := createProcessor(ctx, set, procCfg, id, pipelineID, next, factory)
 	if err != nil {
-		return nil, fmt.Errorf("failt to create %q processor, in pipeline %q: %w", id, pipelineID, err)
+		return nil, fmt.Errorf("failed to create %q processor, in pipeline %q: %w", id, pipelineID, err)
 	}
 	return proc, nil
 }
@@ -462,10 +506,11 @@ func buildReceiver(ctx context.Context,
 		BuildInfo:         buildInfo,
 	}
 	set.TelemetrySettings.Logger = receiverLogger(settings.Logger, id, pipelineID.Type())
+	logStabilityMessage(set.TelemetrySettings.Logger, factory.StabilityLevel(pipelineID.Type()))
 
 	recv, err := createReceiver(ctx, set, cfg, id, pipelineID, nexts, factory)
 	if err != nil {
-		return nil, fmt.Errorf("failt to create %q receiver, in pipeline %q: %w", id, pipelineID, err)
+		return nil, fmt.Errorf("failed to create %q receiver, in pipeline %q: %w", id, pipelineID, err)
 	}
 
 	return recv, nil
